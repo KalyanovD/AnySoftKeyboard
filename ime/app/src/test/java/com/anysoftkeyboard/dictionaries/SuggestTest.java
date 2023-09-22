@@ -1,8 +1,24 @@
 package com.anysoftkeyboard.dictionaries;
 
+import static androidx.test.core.app.ApplicationProvider.getApplicationContext;
+
 import androidx.core.util.Pair;
 import com.anysoftkeyboard.AnySoftKeyboardRobolectricTestRunner;
 import com.anysoftkeyboard.api.KeyCodes;
+import com.anysoftkeyboard.dictionaries.jni.BinaryDictionary;
+
+import java.io.BufferedReader;
+import java.io.Closeable;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -14,6 +30,73 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
+
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.ZipInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.nio.charset.Charset;
+import java.io.Closeable;
+
+class KeystrokeSavingsMetric {
+    // KS = 100% * ( 1 - ( 1 / |W| ) * Sum( num_of_used_keys / len_of_word ) )
+    long numOfWords;
+    double currentSumResult;
+
+    public void updateSum(long numOfKeysUsed, long wordsLen) {
+        currentSumResult += (double)numOfKeysUsed / (double)wordsLen;
+        numOfWords++;
+    }
+
+    public double get() {
+        return 100 * (1 - currentSumResult / numOfWords);
+    }
+}
+
+class TestWordsReader {
+    private List<String> wordsList;
+    private long wordsCount;
+    private static final Pattern mWordLineRegex =
+            Pattern.compile("([\\w\\p{L}'\"-]+)");
+    public void readFile (String path) throws IOException {
+        List<String> wl = new ArrayList<String>();
+        wordsCount = 0;
+        try {
+            List<String> wordsListTmp = Files.readAllLines(Paths.get(path))
+                        .stream()
+                        .map(l -> l.split(" "))
+                        .flatMap(Arrays::stream)
+                        .collect(Collectors.toList());
+            for (String word : wordsListTmp) {
+                word = word.replaceAll("[!\"\\#$%&()*+,./:;=?@\\[\\\\\\]^_`{|}~]", "");
+                Matcher matcher = mWordLineRegex.matcher(word);
+                if (matcher.matches()) {
+                    wl.add(word);
+                    wordsCount++;
+                }
+            }
+            wordsList = wl;
+        }
+        catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public List<String> getWordsList() {
+        return wordsList;
+    }
+}
 
 @RunWith(AnySoftKeyboardRobolectricTestRunner.class)
 public class SuggestTest {
@@ -36,9 +119,84 @@ public class SuggestTest {
 
   @Before
   public void setUp() throws Exception {
+//    Dictionary userDictionary = new BinaryDictionary(getApplicationContext(), "en");
+//    userDictionary.loadDictionary();
     mProvider = Mockito.mock(SuggestionsProvider.class);
     mUnderTest = new SuggestImpl(mProvider);
   }
+
+//  @Test
+//  public void testGetKS() {
+//      Plugin plugin = new MakeDictionaryPlugin();
+////      val project = mock<Project>()
+////      val extensions = mock<ExtensionContainer>()
+////      doReturn(extensions).`when`(project).extensions
+////    underTest.apply(project)
+////    verify(extensions).create(eq("versionGenerator"), eq(VersionGeneratorPlugin.Factory::class.java), same(project))
+//    WordComposer wordComposer = new WordComposer();
+//    typeWord(wordComposer, "hel");
+//    Assert.assertEquals(2, mUnderTest.getSuggestions(wordComposer).size());
+//  }
+
+    @Test
+    public void testGetKS() throws IOException {
+        // Read test dataset to list of words
+        TestWordsReader twr = new TestWordsReader();
+        List<String> wordsList = Collections.emptyList();
+        try {
+            twr.readFile("C:\\Users\\d.kalyanov\\Documents\\mobile_keyboard\\WordPrediction\\unked-clean-dict-15k\\unked-clean-dict-15k\\tmp.txt");
+//            twr.readFile("C:\\Users\\d.kalyanov\\Documents\\mobile_keyboard\\WordPrediction\\unked-clean-dict-15k\\unked-clean-dict-15k\\en-sents-shuf.00.test.txt");
+            wordsList = twr.getWordsList();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        // Prepare dictionary for further prediction
+        // TODO: change from naive version to stock
+        mUnderTest.setCorrectionMode(true, 1, 2, true);
+        Mockito.doAnswer(
+                        invocation -> {
+                            final Dictionary.WordCallback callback = invocation.getArgument(1);
+                            callback.addWord("hell".toCharArray(), 0, 4, 22, Mockito.mock(Dictionary.class));
+                            callback.addWord("hello".toCharArray(), 0, 5, 23, Mockito.mock(Dictionary.class));
+                            return null;
+                        })
+                .when(mProvider)
+                .getSuggestions(Mockito.any(), Mockito.any());
+
+        // Make a key wise typing emulation to get a suggestion list from a dictionary
+        KeystrokeSavingsMetric metricMajor = new KeystrokeSavingsMetric(); // for first word in a list of suggestions
+        KeystrokeSavingsMetric metricMinor = new KeystrokeSavingsMetric(); // for first 3 words
+
+        for (CharSequence word : wordsList) {
+            WordComposer wordComposer = new WordComposer();
+            int i = 0;
+            boolean sideWordsChoosingFlag = true; // to divide major and minor metrics count
+            while (i < word.length()) {
+                typeWord(wordComposer, "" + word.charAt(i));
+                i++;
+                List<CharSequence> suggestions = mUnderTest.getSuggestions(wordComposer);
+                System.out.println(suggestions);
+//              Assert.assertEquals(word, suggestions.get(0).toString());
+
+                if (Objects.equals(word.toString(), suggestions.get(0).toString())) {
+                    metricMajor.updateSum(i, word.length());
+                    if (sideWordsChoosingFlag) metricMinor.updateSum(i, word.length());
+                    break;
+                }
+                try {
+                    if (Objects.equals(word.toString(), suggestions.get(1).toString()) && sideWordsChoosingFlag) {
+                        metricMinor.updateSum(i, word.length());
+                        sideWordsChoosingFlag = false;
+                    }
+                    if (Objects.equals(word.toString(), suggestions.get(2).toString()) && sideWordsChoosingFlag) {
+                        metricMinor.updateSum(i, word.length());
+                        sideWordsChoosingFlag = false;
+                    }
+                } catch (IndexOutOfBoundsException e) {}
+            }
+        }
+    }
 
   @Test
   public void testDelegatesIncognito() {
