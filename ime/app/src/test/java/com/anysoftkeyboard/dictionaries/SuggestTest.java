@@ -257,6 +257,8 @@ public class SuggestTest {
                 System.out.println("." + ((100 * numOfWords) / wordsList.size()) + "%.");
                 System.out.println("KS metric for main word suggestion: " + metricMajor.get() + "%.");
                 System.out.println("KS metric for 3 words suggestion: " + metricMinor.get() + "%.");
+                long elapsedTimeMillis = System.currentTimeMillis()-start;
+                System.out.println("Elapsed time: " + elapsedTimeMillis/1000F + "s");
             }
         }
 
