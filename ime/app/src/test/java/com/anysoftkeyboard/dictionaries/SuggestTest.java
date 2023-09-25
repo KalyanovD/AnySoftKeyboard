@@ -194,7 +194,7 @@ public class SuggestTest {
         List<String> wordsList = Collections.emptyList();
         try {
             twr.readFile("C:\\Users\\d.kalyanov\\Documents\\mobile_keyboard\\WordPrediction\\unked-clean-dict-15k\\unked-clean-dict-15k\\en-sents-shuf.00.test.txt");
-            wordsList = twr.getWordsList(10000);
+            wordsList = twr.getWordsList(100000);
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -255,13 +255,15 @@ public class SuggestTest {
             numOfWords++;
             if ((numOfWords % 1000) == 0) {
                 System.out.println("." + ((100 * numOfWords) / wordsList.size()) + "%.");
+                System.out.println("KS metric for main word suggestion: " + metricMajor.get() + "%.");
+                System.out.println("KS metric for 3 words suggestion: " + metricMinor.get() + "%.");
             }
         }
 
         long elapsedTimeMillis = System.currentTimeMillis()-start;
 
-        System.out.println("\nKS metric for main word suggestion: " + metricMajor.get() + "%.");
-        System.out.println("KS metric for 3 words suggestion: " + metricMinor.get() + "%.");
+        System.out.println("\nFinal KS metric for main word suggestion: " + metricMajor.get() + "%.");
+        System.out.println("Final KS metric for 3 words suggestion: " + metricMinor.get() + "%.");
         // Get elapsed time in seconds
         System.out.println("Elapsed time: " + elapsedTimeMillis/1000F + "s");
     }
