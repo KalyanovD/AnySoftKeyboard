@@ -1,4 +1,5 @@
 package com.anysoftkeyboard.dictionaries;
+import com.anysoftkeyboard.nextword.*;
 
 import static androidx.test.core.app.ApplicationProvider.getApplicationContext;
 
@@ -8,8 +9,10 @@ import com.anysoftkeyboard.api.KeyCodes;
 import com.menny.android.anysoftkeyboard.AnyApplication;
 
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -18,6 +21,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import org.junit.Assert;
@@ -30,6 +35,7 @@ import org.mockito.Mockito;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -37,24 +43,34 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipInputStream;
 
 
-class KeystrokeSavingsMetric {
+class MetricCollector {
     // KS = 100% * ( 1 - ( 1 / |W| ) * Sum( num_of_used_keys / len_of_word ) )
-    long numOfWords;
-    double currentSumResult;
+    // WPR = 100% * ( |W_predicted_correctly| / |W| )
+    public long numOfWords = 0;
+    private long numOfWordsPredicted = 0;
+    private double currentSumResult = 0;
 
     public void updateSum(long numOfKeysUsed, long wordsLen) {
         currentSumResult += (double)numOfKeysUsed / (double)wordsLen;
         numOfWords++;
     }
 
-    public double get() {
+    public double getKeystrokeSavings() {
         return 100 * (1 - currentSumResult / numOfWords);
+    }
+
+    public void incrementNumOfPredictedWords() {
+        numOfWordsPredicted++;
+    }
+
+    public double getWordPredictionRate() {
+        return 100 * ((double)numOfWordsPredicted / (double)numOfWords);
     }
 }
 
 class TestWordsReader {
     private List<String> wordsList;
-    private long wordsCount; // 45.291.291 words in test dataset
+    private long wordsCount; // 45.291.291 words in test dataset,  695.472 uniques of them
     private static final Pattern mWordLineRegex =
             Pattern.compile("([\\w\\p{L}'\"-]+)");
     public void readFile (String path) throws IOException {
@@ -82,11 +98,26 @@ class TestWordsReader {
     }
 
     public List<String> getWordsList(int nElem) {
+        Collections.shuffle(wordsList);
         return wordsList.subList(0,nElem);
     }
 
     public List<String> getWordsList() {
         return wordsList;
+    }
+
+    public void getUniqueWords(String outputFileName) throws IOException {
+        HashSet<String> uniqueValues = new HashSet<>(wordsList);
+        BufferedWriter out = new BufferedWriter(new FileWriter(outputFileName));
+
+        Iterator<String> it = uniqueValues.iterator();
+        while(it.hasNext()) {
+            out.write(it.next());
+            out.newLine();
+        }
+        out.close();
+
+//            System.out.println(uniqueValues.size());
     }
 }
 
@@ -95,7 +126,7 @@ class DictionaryWordsReader {
             Pattern.compile("^\\s*word=([\\w\\p{L}'\"-]+),f=(\\d+).*$");
 
     private File inputFile =
-            new File("C:\\Users\\d.kalyanov\\Documents\\mobile_keyboard\\AnySoftKeyboard\\addons\\languages\\english\\pack\\dictionary\\aosp.combined.gz");
+            new File("..\\..\\addons\\languages\\english\\pack\\dictionary\\aosp.combined.gz");
     private File outputWordsListFile;
     private int maxWordsInList = 500000;
     private long countWordsRead;
@@ -164,6 +195,7 @@ public class SuggestTest {
   private SuggestionsProvider mProvider;
   private Suggest mUnderTest;
   private ExternalDictionaryFactory mFactory;
+  private NextWordDictionary mNextWordDictionaryUnderTest;
 
   private static void typeWord(WordComposer wordComposer, String word) {
     final boolean[] noSpace = new boolean[word.length()];
@@ -178,11 +210,37 @@ public class SuggestTest {
     }
   }
 
+  private void comparePrevAndNextWords(CharSequence prevWord, CharSequence nextWord, AtomicBoolean isPredictedEqualWithNextWord) {
+      mNextWordDictionaryUnderTest.getNextWords(prevWord.toString(), 3, 0)
+              .forEach(x -> isPredictedEqualWithNextWord.set(isPredictedEqualWithNextWord.get() | Objects.equals(
+                      nextWord.toString(), x.toLowerCase())));
+  }
+
+    private int getNextWordPredictionInfluence(int i, List<String> wordsList, AtomicBoolean isPredictedEqualWithNextWord, MetricCollector metricMajor, MetricCollector metricMinor, boolean sideWordsChoosingFlag) {
+        mNextWordDictionaryUnderTest.notifyNextTypedWord(wordsList.get(i).toString());
+        if (i >= wordsList.size() - 1) return wordsList.size() - 1;
+        comparePrevAndNextWords(wordsList.get(i), wordsList.get(i + 1), isPredictedEqualWithNextWord);
+
+        while (isPredictedEqualWithNextWord.get() && i < wordsList.size() - 2) {
+            metricMajor.incrementNumOfPredictedWords();
+            metricMajor.updateSum(1, 1 + wordsList.get(i + 1).length());
+            if (sideWordsChoosingFlag && metricMinor != null) {
+                metricMinor.incrementNumOfPredictedWords();
+                metricMinor.updateSum(1, 1 + wordsList.get(i + 1).length());
+            }
+            i++;
+            isPredictedEqualWithNextWord.set(false);
+            comparePrevAndNextWords(wordsList.get(i), wordsList.get(i + 1), isPredictedEqualWithNextWord);
+        }
+        return i;
+    }
+
   @Before
   public void setUp() throws Exception {
     mFactory = AnyApplication.getExternalDictionaryFactory(getApplicationContext());
     mProvider = Mockito.mock(SuggestionsProvider.class);
     mUnderTest = new SuggestImpl(mProvider);
+    mNextWordDictionaryUnderTest = new NextWordDictionary(getApplicationContext(), "en");
   }
 
     @Test
@@ -193,8 +251,12 @@ public class SuggestTest {
         TestWordsReader twr = new TestWordsReader();
         List<String> wordsList = Collections.emptyList();
         try {
-            twr.readFile("C:\\Users\\d.kalyanov\\Documents\\mobile_keyboard\\WordPrediction\\unked-clean-dict-15k\\unked-clean-dict-15k\\en-sents-shuf.00.test.txt");
-            wordsList = twr.getWordsList(100000);
+//            twr.readFile("..\\..\\..\\WordPrediction\\unked-clean-dict-15k\\unked-clean-dict-15k\\en-sents-shuf.00.test.txt");
+//            wordsList = twr.getWordsList(50000);
+            twr.readFile("..\\..\\..\\WordPrediction\\eval_kss_en.txt");
+            wordsList = twr.getWordsList();
+
+//            twr.getUniqueWords("..\\..\\..\\WordPrediction\\uniques-in-eval-kss.txt");
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -216,56 +278,89 @@ public class SuggestTest {
                 .getSuggestions(Mockito.any(), Mockito.any());
 
         // Make a key wise typing emulation to get a suggestion list from a dictionary
-        long numOfWords = 0;
-        KeystrokeSavingsMetric metricMajor = new KeystrokeSavingsMetric(); // for first word in a list of suggestions
-        KeystrokeSavingsMetric metricMinor = new KeystrokeSavingsMetric(); // for first 3 words
+        MetricCollector metricMajor = new MetricCollector(); // for first word in a list of suggestions
+        MetricCollector metricMinor = new MetricCollector(); // for first 3 words
 
-        for (CharSequence word : wordsList) {
+        mNextWordDictionaryUnderTest.load();
+        for (int i = 0; i < wordsList.size(); i++) {
+            CharSequence word = wordsList.get(i);
             WordComposer wordComposer = new WordComposer();
-            int i = 0;
+            int j = 0;
             boolean sideWordsChoosingFlag = true; // to divide major and minor metrics count
-            while (i < word.length()) {
-                typeWord(wordComposer, "" + word.charAt(i));
-                i++;
+            while (j < word.length()) {
+                typeWord(wordComposer, "" + word.charAt(j));
+                j++;
+
                 List<CharSequence> suggestions = mUnderTest.getSuggestions(wordComposer);
 
-                // suggestions.get(0) - typed word, suggestions.get(i) - suggestions
-                if (Objects.equals(word.toString(), suggestions.get(0).toString())) {
-                    metricMajor.updateSum(i, word.length());
-                    if (sideWordsChoosingFlag) metricMinor.updateSum(i, word.length());
+                AtomicBoolean isPredictedEqualWithNextWord = new AtomicBoolean(false);
+
+                // suggestions.get(0) - typed word, suggestions.get(k) - suggestions
+                if (Objects.equals(word.toString(), suggestions.get(0).toString().toLowerCase())) {
+                    metricMajor.updateSum(j, word.length());
+                    if (sideWordsChoosingFlag) metricMinor.updateSum(j, word.length());
+
+                    // Next word prediction learning and metrics influence
+                    i = getNextWordPredictionInfluence(
+                            i, wordsList, isPredictedEqualWithNextWord, metricMajor, metricMinor, sideWordsChoosingFlag);
+
                     break;
                 }
-                if (Objects.equals(word.toString(), suggestions.get(1).toString())) {
-                    metricMajor.updateSum(i, word.length());
-                    if (sideWordsChoosingFlag) metricMinor.updateSum(i, word.length());
+                if (Objects.equals(word.toString(), suggestions.get(1).toString().toLowerCase())) {
+                    metricMajor.updateSum(j, word.length());
+                    if (sideWordsChoosingFlag) metricMinor.updateSum(j, word.length());
+
+                    // Next word prediction learning and metrics influence
+                    i = getNextWordPredictionInfluence(
+                            i, wordsList, isPredictedEqualWithNextWord, metricMajor, metricMinor, sideWordsChoosingFlag);
+
                     break;
                 }
                 try {
-                    if (Objects.equals(word.toString(), suggestions.get(2).toString()) && sideWordsChoosingFlag) {
-                        metricMinor.updateSum(i, word.length());
+                    if (Objects.equals(word.toString(), suggestions.get(2).toString().toLowerCase()) && sideWordsChoosingFlag) {
+                        metricMinor.updateSum(j, word.length());
                         sideWordsChoosingFlag = false;
+                        // Next word prediction learning and metrics influence
+                        getNextWordPredictionInfluence(
+                                i, wordsList, isPredictedEqualWithNextWord, metricMinor, null, false);
                     }
-                    if (Objects.equals(word.toString(), suggestions.get(3).toString()) && sideWordsChoosingFlag) {
-                        metricMinor.updateSum(i, word.length());
+                    if (Objects.equals(word.toString(), suggestions.get(3).toString().toLowerCase()) && sideWordsChoosingFlag) {
+                        metricMinor.updateSum(j, word.length());
                         sideWordsChoosingFlag = false;
+                        // Next word prediction learning and metrics influence
+                        getNextWordPredictionInfluence(
+                                i, wordsList, isPredictedEqualWithNextWord, metricMinor, null, false);
                     }
                 } catch (IndexOutOfBoundsException e) {}
+
+
             }
 
-            numOfWords++;
-            if ((numOfWords % 1000) == 0) {
-                System.out.println("." + ((100 * numOfWords) / wordsList.size()) + "%.");
-                System.out.println("KS metric for main word suggestion: " + metricMajor.get() + "%.");
-                System.out.println("KS metric for 3 words suggestion: " + metricMinor.get() + "%.");
+            if (i % 100 == 0) {
+                System.out.println("." + ((100 * i) / wordsList.size()) + "%.");
+                System.out.println("KS metric for main word suggestion: " + metricMajor.getKeystrokeSavings() + "%. Num of predicted words: " + metricMajor.numOfWords);
+                System.out.println("KS metric for 3 words suggestion: " + metricMinor.getKeystrokeSavings() + "%. Num of predicted words: " + metricMinor.numOfWords);
+
+                System.out.println("WPR metric for main word suggestion: " + metricMajor.getWordPredictionRate() + "%. Num of predicted words: " + metricMajor.numOfWords);
+                System.out.println("WPR metric for 3 words suggestion: " + metricMinor.getWordPredictionRate() + "%. Num of predicted words: " + metricMinor.numOfWords);
+
                 long elapsedTimeMillis = System.currentTimeMillis()-start;
                 System.out.println("Elapsed time: " + elapsedTimeMillis/1000F + "s");
             }
         }
+        NextWordStatistics nextWordStatistics = mNextWordDictionaryUnderTest.dumpDictionaryStatistics();
+        mNextWordDictionaryUnderTest.close();
+
 
         long elapsedTimeMillis = System.currentTimeMillis()-start;
 
-        System.out.println("\nFinal KS metric for main word suggestion: " + metricMajor.get() + "%.");
-        System.out.println("Final KS metric for 3 words suggestion: " + metricMinor.get() + "%.");
+        System.out.println("\nFinal KS metric for main word suggestion: " + metricMajor.getKeystrokeSavings() + "%. Num of predicted words: " + metricMajor.numOfWords);
+        System.out.println("Final KS metric for 3 words suggestion: " + metricMinor.getKeystrokeSavings() + "%. Num of predicted words: " + metricMinor.numOfWords);
+
+        System.out.println("\nFinal WPR metric for main word suggestion: " + metricMajor.getWordPredictionRate() + "%. Num of predicted words: " + metricMajor.numOfWords);
+        System.out.println("Final WPR metric for 3 words suggestion: " + metricMinor.getWordPredictionRate() + "%. Num of predicted words: " + metricMinor.numOfWords);
+
+        System.out.println("Next word dictionary statistic:\n\tFirst word: "+ nextWordStatistics.firstWordCount + ";\n\tSecond words: " + nextWordStatistics.secondWordCount + ".");
         // Get elapsed time in seconds
         System.out.println("Elapsed time: " + elapsedTimeMillis/1000F + "s");
     }
